@@ -62,6 +62,12 @@ func main() {
 		os.Exit(-1)
 	}
 
+	apps, err := client.ListApps()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(-1)
+	}
+
 	consumer := noaa.NewConsumer(*dopplerEndpoint, &tls.Config{InsecureSkipVerify: *skipSSLValidation}, nil)
 
 	httpStartStopProcessor := processors.NewHttpStartStopProcessor()
@@ -77,19 +83,14 @@ func main() {
 	var proc_err error
 
 	msgChan := make(chan *events.Envelope)
-	go func() {
-		defer close(msgChan)
-		errorChan := make(chan error)
-		if *appGUID == "" {
-			go consumer.Firehose(*subscriptionId, authToken, msgChan, errorChan, nil)
-		} else {
-			go consumer.Stream(*appGUID, authToken, msgChan, errorChan, nil)
-		}
 
-		for err := range errorChan {
-			fmt.Fprintf(os.Stderr, "%v\n", err.Error())
+	if len(apps) == 0 {
+		go setWatcher(cfclient.App{}, authToken, consumer, msgChan)
+	} else {
+		for _, app := range apps {
+			go setWatcher(app, authToken, consumer, msgChan)
 		}
-	}()
+	}
 
 	for msg := range msgChan {
 		eventType := msg.GetEventType()
@@ -131,5 +132,19 @@ func main() {
 			}
 		}
 		processedMetrics = nil
+	}
+}
+
+func setWatcher(app cfclient.App, authToken string, consumer *noaa.Consumer, msgChan chan *events.Envelope) {
+	defer close(msgChan)
+	errorChan := make(chan error)
+	if app.Guid != "" {
+		go consumer.Stream(app.Guid, authToken, msgChan, errorChan, nil)
+	} else {
+		go consumer.Firehose(*subscriptionId, authToken, msgChan, errorChan, nil)
+	}
+
+	for err := range errorChan {
+		fmt.Fprintf(os.Stderr, "%v\n", err.Error())
 	}
 }
