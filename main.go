@@ -7,6 +7,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"os"
+	"sync"
+	"time"
 
 	"github.com/cloudfoundry-community/go-cfclient"
 	"github.com/cloudfoundry/noaa"
@@ -30,16 +32,28 @@ var (
 	clientSecret      = kingpin.Flag("client-secret", "Client Secret.").Default("").OverrideDefaultFromEnvar("CLIENT_SECRET").String()
 	skipSSLValidation = kingpin.Flag("skip-ssl-validation", "Please don't").Default("false").OverrideDefaultFromEnvar("SKIP_SSL_VALIDATION").Bool()
 	debug             = kingpin.Flag("debug", "Enable debug mode. This disables forwarding to statsd and prints to stdout").Default("false").OverrideDefaultFromEnvar("DEBUG").Bool()
-	appGUID           = kingpin.Flag("app-guid", "app GUID to stream events from").Default("").OverrideDefaultFromEnvar("APP_GUID").String()
-	// TODO Add a variable responsible for a metric template
+	metricTemplate    = kingpin.Flag("metric-template", "The template that will form a new metric namespace.").Default("").OverrideDefaultFromEnvar("APP_GUID").String()
+
+	authToken   string
+	consumer    *noaa.Consumer
+	runningApps []string
 )
 
-func main() {
-	var (
-		authToken string
-		err       error
-	)
+func authenticate(client *cfclient.Client) (authToken string, consumer *noaa.Consumer, err error) {
+	// FIXME This works fine, however we need to make sure to refresh the token
+	// manually as we're currently setting it once and expect to work all the
+	// time.
+	authToken, err = client.GetToken()
+	if err != nil {
+		return authToken, consumer, err
+	}
 
+	consumer = noaa.NewConsumer(*dopplerEndpoint, &tls.Config{InsecureSkipVerify: *skipSSLValidation}, nil)
+
+	return authToken, consumer, nil
+}
+
+func main() {
 	kingpin.Parse()
 
 	// FIXME We should ignore the firehose for the time being, making Client ID
@@ -59,24 +73,6 @@ func main() {
 		os.Exit(-1)
 	}
 
-	// FIXME This works fine, however we need to make sure to refresh the token
-	// manually as we're currently setting it once and expect to work all the
-	// time.
-	authToken, err = client.GetToken()
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
-	}
-
-	// FIXME This should probably be moved to the new implementation. - L147
-	apps, err := client.ListApps()
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
-	}
-
-	consumer := noaa.NewConsumer(*dopplerEndpoint, &tls.Config{InsecureSkipVerify: *skipSSLValidation}, nil)
-
 	httpStartStopProcessor := processors.NewHttpStartStopProcessor()
 	valueMetricProcessor := processors.NewValueMetricProcessor()
 	containerMetricProcessor := processors.NewContainerMetricProcessor()
@@ -91,13 +87,7 @@ func main() {
 
 	msgChan := make(chan *events.Envelope)
 
-	if len(apps) == 0 {
-		go setWatcher(cfclient.App{}, authToken, consumer, msgChan)
-	} else {
-		for _, app := range apps {
-			go setWatcher(app, authToken, consumer, msgChan)
-		}
-	}
+	go watchApps(client, msgChan)
 
 	for msg := range msgChan {
 		eventType := msg.GetEventType()
@@ -123,7 +113,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%v\n", proc_err.Error())
 		} else {
 			// TODO We'd like to implement the metric template somewhere about here.
-			fmt.Printf("\n\n\n%v\n\n\n", processedMetrics)
 			if !*debug {
 				if len(processedMetrics) > 0 {
 					for _, metric := range processedMetrics {
@@ -144,21 +133,67 @@ func main() {
 	}
 }
 
+// AppMutex should consit of a lock and the map of applications.
+type AppMutex struct {
+	watch map[string]chan struct{}
+	mutex *sync.Mutex
+}
+
 // TODO Implement an application watcher that will kill or start new goroutines
 // if the need arises.
+func watchApps(client *cfclient.Client, msgChan chan *events.Envelope) {
+	// defer close(msgChan)
 
-// FIXME With the above implementation, this funcion may turn out to be
-// redundant.
-func setWatcher(app cfclient.App, authToken string, consumer *noaa.Consumer, msgChan chan *events.Envelope) {
-	defer close(msgChan)
-	errorChan := make(chan error)
-	if app.Guid != "" {
-		go consumer.Stream(app.Guid, authToken, msgChan, errorChan, nil)
-	} else {
-		go consumer.Firehose(*subscriptionId, authToken, msgChan, errorChan, nil)
+	applications := AppMutex{}
+	applications.watch = make(map[string]chan struct{})
+	applications.mutex = &sync.Mutex{}
+
+	for {
+		updateApps(client, applications, msgChan)
+		time.Sleep(300)
+	}
+}
+
+func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *events.Envelope) {
+	applications.mutex.Lock()
+	defer applications.mutex.Unlock()
+
+	authToken, err := client.GetToken()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(-1)
 	}
 
-	for err := range errorChan {
-		fmt.Fprintf(os.Stderr, "%v\n", err.Error())
+	apps, err := client.ListApps()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(-1)
+	}
+
+	for _, app := range apps {
+		keyName := app.SpaceData.Entity.Name + "." + app.Name
+		errorChan := make(chan error)
+
+		if _, ok := applications.watch[keyName]; !ok {
+			runningApps = append(runningApps, keyName)
+			applications.watch[keyName] = make(chan struct{})
+			fmt.Printf("\n%#v\n%#v\n%#v\n%#v\n%#v\n", app.Guid, authToken, msgChan, errorChan, applications.watch[keyName])
+			go consumer.Stream(app.Guid, authToken, msgChan, errorChan, applications.watch[keyName])
+		}
+
+		for err := range errorChan {
+			fmt.Fprintf(os.Stderr, "%v\n", err.Error())
+		}
+	}
+
+	// This loop is just "converting" a slice of map keys.
+	watchers := []string{}
+	for k := range applications.watch {
+		watchers = append(watchers, k)
+	}
+
+	for _, app := range difference(runningApps, watchers) {
+		applications.watch[app] <- struct{}{}
+		delete(applications.watch, app)
 	}
 }
