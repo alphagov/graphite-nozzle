@@ -31,6 +31,7 @@ var (
 	skipSSLValidation = kingpin.Flag("skip-ssl-validation", "Please don't").Default("false").OverrideDefaultFromEnvar("SKIP_SSL_VALIDATION").Bool()
 	debug             = kingpin.Flag("debug", "Enable debug mode. This disables forwarding to statsd and prints to stdout").Default("false").OverrideDefaultFromEnvar("DEBUG").Bool()
 	appGUID           = kingpin.Flag("app-guid", "app GUID to stream events from").Default("").OverrideDefaultFromEnvar("APP_GUID").String()
+	// TODO Add a variable responsible for a metric template
 )
 
 func main() {
@@ -41,6 +42,8 @@ func main() {
 
 	kingpin.Parse()
 
+	// FIXME We should ignore the firehose for the time being, making Client ID
+	// and Secret redundant.
 	c := &cfclient.Config{
 		ApiAddress:        *apiEndpoint,
 		SkipSslValidation: *skipSSLValidation,
@@ -56,12 +59,16 @@ func main() {
 		os.Exit(-1)
 	}
 
+	// FIXME This works fine, however we need to make sure to refresh the token
+	// manually as we're currently setting it once and expect to work all the
+	// time.
 	authToken, err = client.GetToken()
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(-1)
 	}
 
+	// FIXME This should probably be moved to the new implementation. - L147
 	apps, err := client.ListApps()
 	if err != nil {
 		fmt.Println(err)
@@ -115,6 +122,8 @@ func main() {
 		if proc_err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", proc_err.Error())
 		} else {
+			// TODO We'd like to implement the metric template somewhere about here.
+			fmt.Printf("\n\n\n%v\n\n\n", processedMetrics)
 			if !*debug {
 				if len(processedMetrics) > 0 {
 					for _, metric := range processedMetrics {
@@ -135,6 +144,11 @@ func main() {
 	}
 }
 
+// TODO Implement an application watcher that will kill or start new goroutines
+// if the need arises.
+
+// FIXME With the above implementation, this funcion may turn out to be
+// redundant.
 func setWatcher(app cfclient.App, authToken string, consumer *noaa.Consumer, msgChan chan *events.Envelope) {
 	defer close(msgChan)
 	errorChan := make(chan error)
