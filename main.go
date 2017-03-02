@@ -163,12 +163,12 @@ func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *ev
 			msg, err := noaaConsumer.Stream(app.Guid, authToken)
 			go func() {
 				for m := range msg {
-					fmt.Println(m)
+					msgChan <- m
 				}
 			}()
 			go func() {
 				for e := range err {
-					fmt.Println(e)
+					errorChan <- e
 				}
 			}()
 		}
