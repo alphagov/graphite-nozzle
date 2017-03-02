@@ -4,6 +4,7 @@ package main
 // https://github.com/cloudfoundry/noaa/blob/master/firehose_sample/main.go
 
 import (
+	"crypto/tls"
 	"fmt"
 	"os"
 	"sync"
@@ -32,8 +33,6 @@ var (
 	skipSSLValidation = kingpin.Flag("skip-ssl-validation", "Please don't").Default("false").OverrideDefaultFromEnvar("SKIP_SSL_VALIDATION").Bool()
 	debug             = kingpin.Flag("debug", "Enable debug mode. This disables forwarding to statsd and prints to stdout").Default("false").OverrideDefaultFromEnvar("DEBUG").Bool()
 	metricTemplate    = kingpin.Flag("metric-template", "The template that will form a new metric namespace.").Default("").OverrideDefaultFromEnvar("METRIC_TEMPLATE").String()
-
-	consumer *noaa.Consumer
 )
 
 func main() {
@@ -148,6 +147,8 @@ func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *ev
 	if err != nil {
 		return err
 	}
+
+	consumer := noaa.NewConsumer(*dopplerEndpoint, &tls.Config{InsecureSkipVerify: *skipSSLValidation}, nil)
 
 	apps, err := client.ListApps()
 	if err != nil {
