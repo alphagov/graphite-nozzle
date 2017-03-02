@@ -32,6 +32,7 @@ var (
 	clientSecret      = kingpin.Flag("client-secret", "Client Secret.").Default("").OverrideDefaultFromEnvar("CLIENT_SECRET").String()
 	skipSSLValidation = kingpin.Flag("skip-ssl-validation", "Please don't").Default("false").OverrideDefaultFromEnvar("SKIP_SSL_VALIDATION").Bool()
 	debug             = kingpin.Flag("debug", "Enable debug mode. This disables forwarding to statsd and prints to stdout").Default("false").OverrideDefaultFromEnvar("DEBUG").Bool()
+	updateFrequency   = kingpin.Flag("update-frequency", "The time in seconds, that takes between each apps update call.").Default("300").OverrideDefaultFromEnvar("UPDATE_FREQUENCY").Int64()
 	metricTemplate    = kingpin.Flag("metric-template", "The template that will form a new metric namespace.").Default("").OverrideDefaultFromEnvar("METRIC_TEMPLATE").String()
 )
 
@@ -89,7 +90,7 @@ func main() {
 				os.Exit(-1)
 			}
 
-			time.Sleep(5 * time.Minute)
+			time.Sleep(time.Duration(*updateFrequency) * time.Second)
 		}
 	}()
 
