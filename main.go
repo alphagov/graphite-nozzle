@@ -4,7 +4,6 @@ package main
 // https://github.com/cloudfoundry/noaa/blob/master/firehose_sample/main.go
 
 import (
-	"crypto/tls"
 	"fmt"
 	"os"
 	"sync"
@@ -32,26 +31,10 @@ var (
 	clientSecret      = kingpin.Flag("client-secret", "Client Secret.").Default("").OverrideDefaultFromEnvar("CLIENT_SECRET").String()
 	skipSSLValidation = kingpin.Flag("skip-ssl-validation", "Please don't").Default("false").OverrideDefaultFromEnvar("SKIP_SSL_VALIDATION").Bool()
 	debug             = kingpin.Flag("debug", "Enable debug mode. This disables forwarding to statsd and prints to stdout").Default("false").OverrideDefaultFromEnvar("DEBUG").Bool()
-	metricTemplate    = kingpin.Flag("metric-template", "The template that will form a new metric namespace.").Default("").OverrideDefaultFromEnvar("APP_GUID").String()
+	metricTemplate    = kingpin.Flag("metric-template", "The template that will form a new metric namespace.").Default("").OverrideDefaultFromEnvar("METRIC_TEMPLATE").String()
 
-	authToken   string
-	consumer    *noaa.Consumer
-	runningApps []string
+	consumer *noaa.Consumer
 )
-
-func authenticate(client *cfclient.Client) (authToken string, consumer *noaa.Consumer, err error) {
-	// FIXME This works fine, however we need to make sure to refresh the token
-	// manually as we're currently setting it once and expect to work all the
-	// time.
-	authToken, err = client.GetToken()
-	if err != nil {
-		return authToken, consumer, err
-	}
-
-	consumer = noaa.NewConsumer(*dopplerEndpoint, &tls.Config{InsecureSkipVerify: *skipSSLValidation}, nil)
-
-	return authToken, consumer, nil
-}
 
 func main() {
 	kingpin.Parse()
@@ -86,15 +69,8 @@ func main() {
 	var proc_err error
 
 	msgChan := make(chan *events.Envelope)
-	errorChan := make(chan error)
 
-	go func() {
-		for err := range errorChan {
-			fmt.Fprintf(os.Stderr, "%v\n", err.Error())
-		}
-	}()
-
-	go watchApps(client, msgChan, errorChan)
+	go watchApps(client, msgChan)
 
 	for msg := range msgChan {
 		eventType := msg.GetEventType()
@@ -148,43 +124,50 @@ type AppMutex struct {
 
 // TODO Implement an application watcher that will kill or start new goroutines
 // if the need arises.
-func watchApps(client *cfclient.Client, msgChan chan *events.Envelope, errorChan chan error) {
-	// defer close(msgChan)
-
+func watchApps(client *cfclient.Client, msgChan chan *events.Envelope) {
 	applications := AppMutex{}
 	applications.watch = make(map[string]chan struct{})
 	applications.mutex = &sync.Mutex{}
 
 	for {
-		updateApps(client, applications, msgChan, errorChan)
-		time.Sleep(300)
+		err := updateApps(client, applications, msgChan)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(-1)
+		}
+
+		time.Sleep(5 * time.Minute)
 	}
 }
 
-func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *events.Envelope, errorChan chan error) {
+func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *events.Envelope) error {
 	applications.mutex.Lock()
 	defer applications.mutex.Unlock()
 
 	authToken, err := client.GetToken()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
+		return err
 	}
 
 	apps, err := client.ListApps()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
+		return err
 	}
+
+	runningApps := []string{}
 
 	for _, app := range apps {
 		keyName := app.SpaceData.Entity.Name + "." + app.Name
+		errorChan := make(chan error)
 
 		if _, ok := applications.watch[keyName]; !ok {
 			runningApps = append(runningApps, keyName)
 			applications.watch[keyName] = make(chan struct{})
-			fmt.Printf("\n%#v\n%#v\n%#v\n%#v\n%#v\n", app.Guid, authToken, msgChan, errorChan, applications.watch[keyName])
-			go consumer.Stream(app.Guid, authToken, msgChan, errorChan, applications.watch[keyName])
+			go consumer.Stream(string(app.Guid), string(authToken), msgChan, errorChan, applications.watch[keyName])
+		}
+
+		for err := range errorChan {
+			fmt.Fprintf(os.Stderr, "%v\n", err.Error())
 		}
 	}
 
@@ -198,4 +181,6 @@ func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *ev
 		applications.watch[app] <- struct{}{}
 		delete(applications.watch, app)
 	}
+
+	return nil
 }
