@@ -86,8 +86,15 @@ func main() {
 	var proc_err error
 
 	msgChan := make(chan *events.Envelope)
+	errorChan := make(chan error)
 
-	go watchApps(client, msgChan)
+	go func() {
+		for err := range errorChan {
+			fmt.Fprintf(os.Stderr, "%v\n", err.Error())
+		}
+	}()
+
+	go watchApps(client, msgChan, errorChan)
 
 	for msg := range msgChan {
 		eventType := msg.GetEventType()
@@ -141,7 +148,7 @@ type AppMutex struct {
 
 // TODO Implement an application watcher that will kill or start new goroutines
 // if the need arises.
-func watchApps(client *cfclient.Client, msgChan chan *events.Envelope) {
+func watchApps(client *cfclient.Client, msgChan chan *events.Envelope, errorChan chan error) {
 	// defer close(msgChan)
 
 	applications := AppMutex{}
@@ -149,12 +156,12 @@ func watchApps(client *cfclient.Client, msgChan chan *events.Envelope) {
 	applications.mutex = &sync.Mutex{}
 
 	for {
-		updateApps(client, applications, msgChan)
+		updateApps(client, applications, msgChan, errorChan)
 		time.Sleep(300)
 	}
 }
 
-func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *events.Envelope) {
+func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *events.Envelope, errorChan chan error) {
 	applications.mutex.Lock()
 	defer applications.mutex.Unlock()
 
@@ -172,17 +179,12 @@ func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *ev
 
 	for _, app := range apps {
 		keyName := app.SpaceData.Entity.Name + "." + app.Name
-		errorChan := make(chan error)
 
 		if _, ok := applications.watch[keyName]; !ok {
 			runningApps = append(runningApps, keyName)
 			applications.watch[keyName] = make(chan struct{})
 			fmt.Printf("\n%#v\n%#v\n%#v\n%#v\n%#v\n", app.Guid, authToken, msgChan, errorChan, applications.watch[keyName])
 			go consumer.Stream(app.Guid, authToken, msgChan, errorChan, applications.watch[keyName])
-		}
-
-		for err := range errorChan {
-			fmt.Fprintf(os.Stderr, "%v\n", err.Error())
 		}
 	}
 
