@@ -68,8 +68,30 @@ func main() {
 	var proc_err error
 
 	msgChan := make(chan *events.Envelope)
+	errorChan := make(chan error)
+	consumer := noaa.NewConsumer(*dopplerEndpoint, &tls.Config{InsecureSkipVerify: *skipSSLValidation}, nil)
 
-	go watchApps(client, msgChan)
+	go func() {
+		for err := range errorChan {
+			fmt.Fprintf(os.Stderr, "%v\n", err.Error())
+		}
+	}()
+
+	go func() {
+		applications := AppMutex{}
+		applications.watch = make(map[string]chan struct{})
+		applications.mutex = &sync.Mutex{}
+
+		for {
+			err := updateApps(client, applications, msgChan, errorChan, consumer)
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(-1)
+			}
+
+			time.Sleep(5 * time.Minute)
+		}
+	}()
 
 	for msg := range msgChan {
 		eventType := msg.GetEventType()
@@ -121,25 +143,7 @@ type AppMutex struct {
 	mutex *sync.Mutex
 }
 
-// TODO Implement an application watcher that will kill or start new goroutines
-// if the need arises.
-func watchApps(client *cfclient.Client, msgChan chan *events.Envelope) {
-	applications := AppMutex{}
-	applications.watch = make(map[string]chan struct{})
-	applications.mutex = &sync.Mutex{}
-
-	for {
-		err := updateApps(client, applications, msgChan)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(-1)
-		}
-
-		time.Sleep(5 * time.Minute)
-	}
-}
-
-func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *events.Envelope) error {
+func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *events.Envelope, errorChan chan error, consumer *noaa.Consumer) error {
 	applications.mutex.Lock()
 	defer applications.mutex.Unlock()
 
@@ -147,8 +151,6 @@ func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *ev
 	if err != nil {
 		return err
 	}
-
-	consumer := noaa.NewConsumer(*dopplerEndpoint, &tls.Config{InsecureSkipVerify: *skipSSLValidation}, nil)
 
 	apps, err := client.ListApps()
 	if err != nil {
@@ -159,16 +161,11 @@ func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *ev
 
 	for _, app := range apps {
 		keyName := app.SpaceData.Entity.Name + "." + app.Name
-		errorChan := make(chan error)
 
 		if _, ok := applications.watch[keyName]; !ok {
 			runningApps = append(runningApps, keyName)
 			applications.watch[keyName] = make(chan struct{})
-			go consumer.Stream(string(app.Guid), string(authToken), msgChan, errorChan, applications.watch[keyName])
-		}
-
-		for err := range errorChan {
-			fmt.Fprintf(os.Stderr, "%v\n", err.Error())
+			go consumer.Stream(app.Guid, authToken, msgChan, errorChan, applications.watch[keyName])
 		}
 	}
 
