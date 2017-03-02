@@ -158,27 +158,21 @@ func updateApps(client *cfclient.Client, applications AppMutex, msgChan chan *ev
 		return err
 	}
 
-	runningApps := []string{}
-
+	runningApps := map[string]bool{}
 	for _, app := range apps {
-		keyName := app.SpaceData.Entity.Name + "." + app.Name
-
-		if _, ok := applications.watch[keyName]; !ok {
-			runningApps = append(runningApps, keyName)
-			applications.watch[keyName] = make(chan struct{})
-			go consumer.Stream(app.Guid, authToken, msgChan, errorChan, applications.watch[keyName])
+		runningApps[app.Guid] = true
+		if _, ok := applications.watch[app.Guid]; !ok {
+			applications.watch[app.Guid] = make(chan struct{})
+			go consumer.Stream(app.Guid, authToken, msgChan, errorChan, applications.watch[app.Guid])
 		}
 	}
 
-	// This loop is just "converting" a slice of map keys.
-	watchers := []string{}
-	for k := range applications.watch {
-		watchers = append(watchers, k)
-	}
-
-	for _, app := range difference(runningApps, watchers) {
-		applications.watch[app] <- struct{}{}
-		delete(applications.watch, app)
+	for appGuid, _ := range applications.watch {
+		if _, ok := runningApps[appGuid]; !ok {
+			applications.watch[appGuid] <- struct{}{}
+			close(applications.watch[appGuid])
+			delete(applications.watch, appGuid)
+		}
 	}
 
 	return nil
